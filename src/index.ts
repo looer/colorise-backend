@@ -110,12 +110,12 @@ app.get('/health', (c) => {
 app.post('/api/auth/anonymous', async (c) => {
   try {
     const body = await c.req.json()
-    const { user_id, device_info, app_version } = body
+    const { device_info, app_version } = body
 
-    if (!user_id || !device_info) {
+    if (!device_info) {
       return c.json({ error: 'Missing required fields' }, 400)
     }
-
+    const user_id = device_info
     const clientIP = c.req.header('x-forwarded-for') ||
       c.req.header('x-real-ip') ||
       'unknown'
@@ -190,7 +190,7 @@ app.post('/api/auth/anonymous', async (c) => {
       success: true,
       token,
       userId: user_id,
-      sessionId,
+      session_id: sessionId,
       limits: {
         daily: dailyLimit,
         remaining: dailyLimit - (userLimits?.dailyRequests || 0),
@@ -244,8 +244,8 @@ const checkRateLimit = async (c: Context<{ Variables: Variables }>, next: Next) 
   await next()
 }
 
-// Replicate processing endpoint
-app.post('/api/replicate/process',
+/// Replicate processing endpoint
+app.post('/api/replicate/colorise',
   authenticateAnonymous,
   checkRateLimit,
   async (c) => {
@@ -253,55 +253,30 @@ app.post('/api/replicate/process',
     const user = c.get('user')
 
     try {
-      const body = await c.req.json()
-      const { image, prompt, model, parameters = {} } = body
+      const formData = await c.req.formData();
+      const image = formData.get('image') as File;
 
       if (!image) {
         return c.json({ error: 'Image required' }, 400)
       }
 
-      // Validate image size
-      const imageSize = Buffer.byteLength(image, 'base64')
-      const maxSize = 10 * 1024 * 1024 // 10MB
-
-      if (imageSize > maxSize) {
-        return c.json({
-          error: 'Image too large (max 10MB)',
-          received: Math.round(imageSize / 1024 / 1024) + 'MB'
-        }, 400)
-      }
-
-      // Sanitize prompt
-      const sanitizedPrompt = sanitizePrompt(prompt || 'enhance this image')
-
-      console.log(`🎨 Processing: ${user.userId.substring(0, 8)}... (${Math.round(imageSize / 1024)}KB)`)
-
-      // Call Replicate
-      const modelId = model || "stability-ai/stable-diffusion:27b93a2413e7f36cd83da926f3656280b2931564ff050bf9575f1fdf9bcd7478"
-
-      const output = await replicate.run(modelId, {
-        input: {
-          image: image,
-          prompt: sanitizedPrompt,
-          ...parameters
-        }
-      })
+      const { result, processingTime, totalTime } = await processImageWithReplicate(image)
 
       // Update counters
       incrementRequestCount(user.userId)
-      updateUserStats(user.userId, Date.now() - startTime)
+      updateUserStats(user.userId, totalTime)
 
       const userLimits = rateLimits.get(user.userId)
       const dailyLimit = getDailyLimit(user.userId)
-      const processingTime = Date.now() - startTime
 
-      console.log(`✅ Completed: ${user.userId.substring(0, 8)}... in ${processingTime}ms`)
+      console.log(`🎉 Completed: ${user.userId.substring(0, 8)}... in ${totalTime}ms`)
 
+      // Return the output URL(s)
       return c.json({
         success: true,
-        result: output,
+        result: result,
         requestId: crypto.randomUUID(),
-        processingTime,
+        processingTime: totalTime,
         limits: {
           daily: dailyLimit,
           remaining: dailyLimit - (userLimits?.dailyRequests || 0),
@@ -326,13 +301,21 @@ app.post('/api/replicate/process',
         }, 400)
       }
 
+      if (errorMessage?.includes('timeout') || errorMessage?.includes('timed out')) {
+        return c.json({
+          error: 'Request timed out. Please try with a smaller image or try again later.'
+        }, 408)
+      }
+
       const errorDetails = error instanceof Error ? error.message : 'Unknown error'
       return c.json({
         error: 'Processing failed. Please try again.',
         details: process.env.NODE_ENV === 'development' ? errorDetails : undefined
       }, 500)
     }
-  })
+  }
+)
+
 
 // User stats endpoint
 app.get('/api/stats', authenticateAnonymous, (c) => {
@@ -368,6 +351,115 @@ app.get('/api/stats', authenticateAnonymous, (c) => {
 
 // Admin endpoints (development only)
 if (process.env.NODE_ENV === 'development') {
+  // Test endpoint that skips auth for development
+  app.post('/api/test/replicate', async (c) => {
+    const startTime = Date.now()
+
+    try {
+      console.log('🧪 Test endpoint called - processing henri-cartier-bresson.jpg')
+
+      // Read the test image file
+      const fs = await import('fs/promises')
+      const path = await import('path')
+
+      const imagePath = path.join(process.cwd(), 'henri-cartier-bresson.jpg')
+
+      let imageBuffer: Buffer
+      try {
+        imageBuffer = await fs.readFile(imagePath)
+        console.log(`📷 Loaded image: ${Math.round(imageBuffer.length / 1024)}KB`)
+      } catch (error) {
+        return c.json({
+          error: 'Image file not found',
+          path: imagePath,
+          hint: 'Make sure henri-cartier-bresson.jpg is in the project root'
+        }, 404)
+      }
+
+      // Validate image size
+      const maxSize = 10 * 1024 * 1024 // 10MB
+      if (imageBuffer.length > maxSize) {
+        return c.json({
+          error: 'Image too large (max 10MB)',
+          received: Math.round(imageBuffer.length / 1024 / 1024) + 'MB'
+        }, 400)
+      }
+
+      console.log(`🎨 Processing test image... (${Math.round(imageBuffer.length / 1024)}KB)`)
+
+      const { result, processingTime, totalTime } = await processImageWithReplicate(imageBuffer)
+
+      console.log(`🎉 Test completed in ${totalTime}ms`)
+
+      // Save the result image locally (development only)
+      if (result) {
+        try {
+          const outputUrl = result as unknown as string
+          console.log(`💾 Downloading result from: ${outputUrl}`)
+
+          const response = await fetch(outputUrl)
+          if (!response.ok) {
+            throw new Error(`Failed to download: ${response.statusText}`)
+          }
+
+          const resultBuffer = Buffer.from(await response.arrayBuffer())
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+          const outputPath = path.join(process.cwd(), `henri-cartier-bresson-restored-${timestamp}.jpg`)
+
+          await fs.writeFile(outputPath, resultBuffer)
+          console.log(`💾 Saved result to: ${outputPath}`)
+
+          return c.json({
+            success: true,
+            result: result,
+            processingTime,
+            savedTo: outputPath,
+            originalSize: `${Math.round(imageBuffer.length / 1024)}KB`,
+            resultSize: `${Math.round(resultBuffer.length / 1024)}KB`
+          })
+        } catch (saveError) {
+          console.error('❌ Failed to save result:', saveError)
+          return c.json({
+            success: true,
+            result: result,
+            processingTime,
+            saveError: saveError instanceof Error ? saveError.message : 'Unknown save error'
+          })
+        }
+      }
+
+      return c.json({
+        success: true,
+        result: result,
+        processingTime
+      })
+
+    } catch (error) {
+      console.error('💥 Test processing error:', error)
+
+      const errorMessage = error instanceof Error ? error.message?.toLowerCase() : ''
+
+      if (errorMessage?.includes('rate limit') || errorMessage?.includes('quota')) {
+        return c.json({
+          error: 'Service temporarily busy. Please try again in a few minutes.'
+        }, 429)
+      }
+
+      if (errorMessage?.includes('timeout') || errorMessage?.includes('timed out')) {
+        return c.json({
+          error: 'Request timed out. Please try with a smaller image or try again later.'
+        }, 408)
+      }
+
+      const errorDetails = error instanceof Error ? error.message : 'Unknown error'
+      return c.json({
+        error: 'Test processing failed',
+        details: errorDetails,
+        processingTime: Date.now() - startTime
+      }, 500)
+    }
+  })
+
   app.get('/api/admin/users', (c) => {
     const users = Array.from(anonymousUsers.values()).map(user => ({
       userId: user.userId.substring(0, 8) + '...',
@@ -405,14 +497,20 @@ if (process.env.NODE_ENV === 'development') {
 
 // 404 handler
 app.notFound((c) => {
+  const endpoints = [
+    'GET /health',
+    'POST /api/auth/anonymous',
+    'POST /api/replicate/colorise',
+    'GET /api/stats'
+  ]
+
+  if (process.env.NODE_ENV === 'development') {
+    endpoints.push('POST /api/test/replicate (dev only)')
+  }
+
   return c.json({
     error: 'Endpoint not found',
-    availableEndpoints: [
-      'GET /health',
-      'POST /api/auth/anonymous',
-      'POST /api/replicate/process',
-      'GET /api/stats'
-    ]
+    availableEndpoints: endpoints
   }, 404)
 })
 
@@ -428,6 +526,35 @@ app.onError((err, c) => {
 })
 
 // Helper functions
+async function processImageWithReplicate(image: Buffer | Blob | File) {
+  const startTime = Date.now()
+
+  const size = image instanceof File ? image.size : image instanceof Blob ? image.size : image.length
+  console.log(`🎨 Starting Replicate processing... (${Math.round(size / 1024)}KB)`)
+
+  // Use replicate.run() to await the result directly (no polling needed)
+  const modelId = "flux-kontext-apps/restore-image"
+  const output: any = await replicate.run(modelId, {
+    input: {
+      input_image: image, // Replicate will handle the image
+      safety_tolerance: 2,
+    }
+  })
+  const result = output.url()
+
+  const totalTime = Date.now() - startTime
+  console.log(`✅ Processing completed in ${totalTime}ms (${(totalTime / 1000).toFixed(1)}s). Result: ${result}`)
+
+
+  const response = {
+    result,
+    totalTime,
+    processingTime: totalTime // For backward compatibility
+  }
+
+  return response
+}
+
 function initializeRateLimit(userId: string): void {
   if (!rateLimits.has(userId)) {
     rateLimits.set(userId, {
