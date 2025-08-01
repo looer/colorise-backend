@@ -702,6 +702,7 @@ serve({
 }, (info) => {
   console.log(`🎉 Server running on http://localhost:${info.port}`)
   console.log(`📊 Health check: http://localhost:${info.port}/health`)
+  console.log(`Node version: ${process.version}`)
   console.log(`🔒 JWT Secret: ${JWT_SECRET ? '✅ Set' : '❌ Missing'}`)
   console.log(`🤖 Replicate Token: ${REPLICATE_API_TOKEN ? '✅ Set' : '❌ Missing'}`)
 })
