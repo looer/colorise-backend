@@ -262,9 +262,8 @@ app.post('/api/replicate/colorise',
 
       const { result, processingTime, totalTime, modelUsed } = await processImageWithReplicate(image)
 
-      // Update counters
-      incrementRequestCount(user.userId)
-      updateUserStats(user.userId, totalTime)
+      // Update user stats and counters
+      updateUserAfterRequest(user.userId, totalTime)
 
       const userLimits = rateLimits.get(user.userId)
       const dailyLimit = getDailyLimit(user.userId)
@@ -532,58 +531,32 @@ app.onError((err, c) => {
 // Helper functions
 async function processImageWithReplicate(image: Buffer | Blob | File) {
   const startTime = Date.now()
-
   const size = image instanceof File ? image.size : image instanceof Blob ? image.size : image.length
   console.log(`🎨 Starting Replicate processing... (${Math.round(size / 1024)}KB)`)
 
-  let result: any
-  let modelUsed: string
+  const models = [
+    { id: "google/nano-banana", input: { image_input: [image], output_format: "png", prompt: "restore the original natural colors of this picture, also restore the parts of the image that are ruined." } },
+    { id: "flux-kontext-apps/restore-image", input: { input_image: image, safety_tolerance: 2 } }
+  ]
 
-  try {
-    // Try nano-banana model first
-    console.log(`🍌 Trying nano-banana model...`)
-    const nanoBananaOutput: any = await replicate.run("google/nano-banana", {
-      input: {
-        image_input: [image], // nano-banana expects an array of images
-        output_format: "png",
-        prompt: "restore the original natural colors of this picture, also restore the parts of the image that are ruined."
-      }
-    })
-    result = nanoBananaOutput.url()
-    modelUsed = "google/nano-banana"
-    console.log(`✅ nano-banana model succeeded`)
-  } catch (error) {
-    console.warn(`⚠️ nano-banana model failed, trying fallback: ${error instanceof Error ? error.message : 'Unknown error'}`)
+  let lastError: Error | null = null
 
-    // Fallback to flux-kontext model
+  for (const model of models) {
     try {
-      console.log(`🔄 Trying flux-kontext fallback model...`)
-      const fluxOutput: any = await replicate.run("flux-kontext-apps/restore-image", {
-        input: {
-          input_image: image,
-          safety_tolerance: 2,
-        }
-      })
-      result = fluxOutput.url()
-      modelUsed = "flux-kontext-apps/restore-image"
-      console.log(`✅ flux-kontext fallback model succeeded`)
-    } catch (fallbackError) {
-      console.error(`❌ Both models failed. nano-banana: ${error instanceof Error ? error.message : 'Unknown'}, flux-kontext: ${fallbackError instanceof Error ? fallbackError.message : 'Unknown'}`)
-      throw fallbackError
+      console.log(`🎨 Trying ${model.id}...`)
+      const output: any = await replicate.run(model.id as any, { input: model.input })
+      const result = output.url()
+      const totalTime = Date.now() - startTime
+
+      console.log(`✅ ${model.id} succeeded in ${totalTime}ms`)
+      return { result, totalTime, processingTime: totalTime, modelUsed: model.id }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Unknown error')
+      console.warn(`⚠️ ${model.id} failed: ${lastError.message}`)
     }
   }
 
-  const totalTime = Date.now() - startTime
-  console.log(`✅ Processing completed in ${totalTime}ms (${(totalTime / 1000).toFixed(1)}s) using ${modelUsed}. Result: ${result}`)
-
-  const response = {
-    result,
-    totalTime,
-    processingTime: totalTime, // For backward compatibility
-    modelUsed
-  }
-
-  return response
+  throw lastError || new Error('All models failed')
 }
 
 function initializeRateLimit(userId: string): void {
@@ -650,15 +623,15 @@ function checkUserRateLimit(userId: string) {
   return { allowed: true }
 }
 
-function incrementRequestCount(userId: string): void {
+function updateUserAfterRequest(userId: string, processingTime: number): void {
+  // Update rate limits
   const userLimits = rateLimits.get(userId)
   if (userLimits) {
     userLimits.dailyRequests++
     userLimits.hourlyRequests++
   }
-}
 
-function updateUserStats(userId: string, processingTime: number): void {
+  // Update user stats
   const userRecord = anonymousUsers.get(userId)
   if (userRecord) {
     userRecord.requestCount++
@@ -681,13 +654,6 @@ function getNextResetTime(): string {
   return tomorrow.toISOString()
 }
 
-function sanitizePrompt(prompt: string): string {
-  return prompt
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/[<>]/g, '')
-    .trim()
-    .slice(0, 500) // Max 500 characters
-}
 
 // Cleanup job - remove old sessions
 setInterval(() => {
