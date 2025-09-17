@@ -260,7 +260,7 @@ app.post('/api/replicate/colorise',
         return c.json({ error: 'Image required' }, 400)
       }
 
-      const { result, processingTime, totalTime } = await processImageWithReplicate(image)
+      const { result, processingTime, totalTime, modelUsed } = await processImageWithReplicate(image)
 
       // Update counters
       incrementRequestCount(user.userId)
@@ -269,7 +269,7 @@ app.post('/api/replicate/colorise',
       const userLimits = rateLimits.get(user.userId)
       const dailyLimit = getDailyLimit(user.userId)
 
-      console.log(`🎉 Completed: ${user.userId.substring(0, 8)}... in ${totalTime}ms`)
+      console.log(`🎉 Completed: ${user.userId.substring(0, 8)}... in ${totalTime}ms using ${modelUsed}`)
 
       // Return the output URL(s)
       return c.json({
@@ -277,6 +277,7 @@ app.post('/api/replicate/colorise',
         result: result,
         requestId: crypto.randomUUID(),
         processingTime: totalTime,
+        modelUsed,
         limits: {
           daily: dailyLimit,
           remaining: dailyLimit - (userLimits?.dailyRequests || 0),
@@ -387,9 +388,9 @@ if (process.env.NODE_ENV === 'development') {
 
       console.log(`🎨 Processing test image... (${Math.round(imageBuffer.length / 1024)}KB)`)
 
-      const { result, processingTime, totalTime } = await processImageWithReplicate(imageBuffer)
+      const { result, processingTime, totalTime, modelUsed } = await processImageWithReplicate(imageBuffer)
 
-      console.log(`🎉 Test completed in ${totalTime}ms`)
+      console.log(`🎉 Test completed in ${totalTime}ms using ${modelUsed}`)
 
       // Save the result image locally (development only)
       if (result) {
@@ -413,6 +414,7 @@ if (process.env.NODE_ENV === 'development') {
             success: true,
             result: result,
             processingTime,
+            modelUsed,
             savedTo: outputPath,
             originalSize: `${Math.round(imageBuffer.length / 1024)}KB`,
             resultSize: `${Math.round(resultBuffer.length / 1024)}KB`
@@ -423,6 +425,7 @@ if (process.env.NODE_ENV === 'development') {
             success: true,
             result: result,
             processingTime,
+            modelUsed,
             saveError: saveError instanceof Error ? saveError.message : 'Unknown save error'
           })
         }
@@ -431,7 +434,8 @@ if (process.env.NODE_ENV === 'development') {
       return c.json({
         success: true,
         result: result,
-        processingTime
+        processingTime,
+        modelUsed
       })
 
     } catch (error) {
@@ -532,24 +536,51 @@ async function processImageWithReplicate(image: Buffer | Blob | File) {
   const size = image instanceof File ? image.size : image instanceof Blob ? image.size : image.length
   console.log(`🎨 Starting Replicate processing... (${Math.round(size / 1024)}KB)`)
 
-  // Use replicate.run() to await the result directly (no polling needed)
-  const modelId = "flux-kontext-apps/restore-image"
-  const output: any = await replicate.run(modelId, {
-    input: {
-      input_image: image, // Replicate will handle the image
-      safety_tolerance: 2,
+  let result: any
+  let modelUsed: string
+
+  try {
+    // Try nano-banana model first
+    console.log(`🍌 Trying nano-banana model...`)
+    const nanoBananaOutput: any = await replicate.run("google/nano-banana", {
+      input: {
+        image_input: [image], // nano-banana expects an array of images
+        output_format: "png",
+        prompt: "restore the original natural colors of this picture, also restore the parts of the image that are ruined."
+      }
+    })
+    result = nanoBananaOutput.url()
+    modelUsed = "google/nano-banana"
+    console.log(`✅ nano-banana model succeeded`)
+  } catch (error) {
+    console.warn(`⚠️ nano-banana model failed, trying fallback: ${error instanceof Error ? error.message : 'Unknown error'}`)
+
+    // Fallback to flux-kontext model
+    try {
+      console.log(`🔄 Trying flux-kontext fallback model...`)
+      const fluxOutput: any = await replicate.run("flux-kontext-apps/restore-image", {
+        input: {
+          input_image: image,
+          safety_tolerance: 2,
+        }
+      })
+      result = fluxOutput.url()
+      modelUsed = "flux-kontext-apps/restore-image"
+      console.log(`✅ flux-kontext fallback model succeeded`)
+    } catch (fallbackError) {
+      console.error(`❌ Both models failed. nano-banana: ${error instanceof Error ? error.message : 'Unknown'}, flux-kontext: ${fallbackError instanceof Error ? fallbackError.message : 'Unknown'}`)
+      throw fallbackError
     }
-  })
-  const result = output.url()
+  }
 
   const totalTime = Date.now() - startTime
-  console.log(`✅ Processing completed in ${totalTime}ms (${(totalTime / 1000).toFixed(1)}s). Result: ${result}`)
-
+  console.log(`✅ Processing completed in ${totalTime}ms (${(totalTime / 1000).toFixed(1)}s) using ${modelUsed}. Result: ${result}`)
 
   const response = {
     result,
     totalTime,
-    processingTime: totalTime // For backward compatibility
+    processingTime: totalTime, // For backward compatibility
+    modelUsed
   }
 
   return response
