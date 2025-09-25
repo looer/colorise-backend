@@ -42,6 +42,87 @@ Health check endpoint showing server status and metrics.
 }
 ```
 
+#### `GET /stats`
+
+Get comprehensive public statistics about API usage across multiple time periods. No authentication required.
+
+**Response:**
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:00.000Z",
+  "periods": {
+    "24h": {
+      "totalRequests": 156,
+      "uniqueUsers": 23,
+      "averageRequestsPerUser": 6.78
+    },
+    "7d": {
+      "totalRequests": 1247,
+      "uniqueUsers": 89,
+      "averageRequestsPerUser": 14.01
+    },
+    "30d": {
+      "totalRequests": 4567,
+      "uniqueUsers": 234,
+      "averageRequestsPerUser": 19.52
+    }
+  },
+  "histogram": {
+    "type": "daily",
+    "period": "7d",
+    "data": [
+      {
+        "date": "2024-01-09",
+        "requests": 45,
+        "users": 12
+      },
+      {
+        "date": "2024-01-10",
+        "requests": 67,
+        "users": 18
+      },
+      {
+        "date": "2024-01-11",
+        "requests": 89,
+        "users": 23
+      },
+      {
+        "date": "2024-01-12",
+        "requests": 123,
+        "users": 31
+      },
+      {
+        "date": "2024-01-13",
+        "requests": 156,
+        "users": 28
+      },
+      {
+        "date": "2024-01-14",
+        "requests": 134,
+        "users": 25
+      },
+      {
+        "date": "2024-01-15",
+        "requests": 156,
+        "users": 23
+      }
+    ]
+  },
+  "totals": {
+    "totalUsers": 234
+  }
+}
+```
+
+**Notes:**
+
+- **Multiple time periods**: 24h, 7d, and 30d statistics
+- **Daily histogram**: Breakdown of requests and users by day for the last 7 days
+- **Extensible structure**: Easy to add new time periods or histogram types
+- **Real-time data**: All statistics are calculated in real-time
+- **No authentication required**: Public endpoint for monitoring API usage
+
 ### 🔐 Authentication
 
 #### `POST /api/auth/anonymous`
@@ -268,3 +349,27 @@ Common HTTP status codes:
 - `408`: Request timeout
 - `429`: Rate limit exceeded
 - `500`: Internal server error
+
+## 🚀 Deployment
+
+### Railway (Recommended)
+
+1. **Connect your repository** to [Railway](https://railway.com?referralCode=Lorenzo)
+2. **Set environment variables:**
+   - `JWT_SECRET`: Generate a secure random string
+   - `REPLICATE_API_TOKEN`: Your Replicate API token
+3. **Deploy**: Railway will automatically build and deploy
+
+### Other Platforms
+
+This is a standard Node application that can be deployed to any platform that supports Node.js.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- [Hono](https://hono.dev/) - Fast, lightweight web framework
+- [Replicate](https://replicate.com/) - AI model hosting platform
+- [Railway](https://railway.app/) - Simple cloud deployment platform

@@ -317,6 +317,104 @@ app.post('/api/replicate/colorise',
 )
 
 
+// Public stats endpoint (no authentication required)
+app.get('/stats', (c) => {
+  const now = new Date()
+  const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+
+  // Calculate stats for different periods
+  const stats24h = calculatePeriodStats(twentyFourHoursAgo, now)
+  const stats7d = calculatePeriodStats(sevenDaysAgo, now)
+  const stats30d = calculatePeriodStats(thirtyDaysAgo, now)
+
+  // Generate daily histogram for the last 7 days
+  const dailyHistogram = generateDailyHistogram(7)
+
+  return c.json({
+    timestamp: now.toISOString(),
+    periods: {
+      '24h': {
+        totalRequests: stats24h.totalRequests,
+        uniqueUsers: stats24h.uniqueUsers,
+        averageRequestsPerUser: stats24h.averageRequestsPerUser
+      },
+      '7d': {
+        totalRequests: stats7d.totalRequests,
+        uniqueUsers: stats7d.uniqueUsers,
+        averageRequestsPerUser: stats7d.averageRequestsPerUser
+      },
+      '30d': {
+        totalRequests: stats30d.totalRequests,
+        uniqueUsers: stats30d.uniqueUsers,
+        averageRequestsPerUser: stats30d.averageRequestsPerUser
+      }
+    },
+    histogram: {
+      type: 'daily',
+      period: '7d',
+      data: dailyHistogram
+    },
+    totals: {
+      totalUsers: anonymousUsers.size
+    }
+  })
+})
+
+// Helper function to calculate stats for a given period
+function calculatePeriodStats(startDate: Date, endDate: Date) {
+  let totalRequests = 0
+  let uniqueUsers = 0
+
+  for (const [userId, userRecord] of anonymousUsers.entries()) {
+    const lastSeen = new Date(userRecord.lastSeen)
+
+    // Check if user was active in the period
+    if (lastSeen >= startDate && lastSeen <= endDate) {
+      uniqueUsers++
+
+      // Get user's rate limit data to count requests
+      const userLimits = rateLimits.get(userId)
+      if (userLimits) {
+        // If the rate limit was reset today, use today's requests
+        const today = new Date().toDateString()
+        if (userLimits.lastResetDate === today) {
+          totalRequests += userLimits.dailyRequests
+        }
+      }
+    }
+  }
+
+  return {
+    totalRequests,
+    uniqueUsers,
+    averageRequestsPerUser: uniqueUsers > 0 ? Math.round(totalRequests / uniqueUsers * 100) / 100 : 0
+  }
+}
+
+// Helper function to generate daily histogram
+function generateDailyHistogram(days: number) {
+  const histogram = []
+  const now = new Date()
+
+  for (let i = days - 1; i >= 0; i--) {
+    const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000)
+    const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000)
+
+    const dayStats = calculatePeriodStats(dayStart, dayEnd)
+
+    histogram.push({
+      date: dayStart.toISOString().split('T')[0], // YYYY-MM-DD format
+      requests: dayStats.totalRequests,
+      users: dayStats.uniqueUsers
+    })
+  }
+
+  return histogram
+}
+
 // User stats endpoint
 app.get('/api/stats', authenticateAnonymous, (c) => {
   const user = c.get('user')
@@ -502,6 +600,7 @@ if (process.env.NODE_ENV === 'development') {
 app.notFound((c) => {
   const endpoints = [
     'GET /health',
+    'GET /stats',
     'POST /api/auth/anonymous',
     'POST /api/replicate/colorise',
     'GET /api/stats'
