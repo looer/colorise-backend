@@ -323,6 +323,116 @@ app.get('/stats', (c) => {
   })
 })
 
+// Dashboard with charts
+app.get('/dashboard', (c) => {
+  const now = new Date()
+  const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+
+  const stats24h = analytics.getStatsForPeriod(twentyFourHoursAgo, now)
+  const stats7d = analytics.getStatsForPeriod(sevenDaysAgo, now)
+  const stats30d = analytics.getStatsForPeriod(thirtyDaysAgo, now)
+  const histogram = analytics.getDailyHistogram(14) // 14 days for better chart
+  const totalUsers = analytics.getTotalUsers()
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Colorise API Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f0f; color: #e0e0e0; padding: 24px; }
+    h1 { font-size: 1.5rem; margin-bottom: 24px; color: #fff; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 32px; }
+    .stat-card { background: #1a1a1a; border-radius: 12px; padding: 20px; border: 1px solid #2a2a2a; }
+    .stat-label { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+    .stat-value { font-size: 2rem; font-weight: 600; color: #fff; }
+    .stat-sub { font-size: 0.875rem; color: #666; margin-top: 4px; }
+    .chart-container { background: #1a1a1a; border-radius: 12px; padding: 24px; border: 1px solid #2a2a2a; }
+    .chart-title { font-size: 1rem; margin-bottom: 16px; color: #fff; }
+    canvas { max-height: 300px; }
+  </style>
+</head>
+<body>
+  <h1>Colorise API</h1>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Last 24 hours</div>
+      <div class="stat-value">${stats24h.totalRequests}</div>
+      <div class="stat-sub">${stats24h.uniqueUsers} users</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Last 7 days</div>
+      <div class="stat-value">${stats7d.totalRequests}</div>
+      <div class="stat-sub">${stats7d.uniqueUsers} users</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Last 30 days</div>
+      <div class="stat-value">${stats30d.totalRequests}</div>
+      <div class="stat-sub">${stats30d.uniqueUsers} users</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Total Users</div>
+      <div class="stat-value">${totalUsers}</div>
+      <div class="stat-sub">all time</div>
+    </div>
+  </div>
+
+  <div class="chart-container">
+    <div class="chart-title">Requests (last 14 days)</div>
+    <canvas id="requestsChart"></canvas>
+  </div>
+
+  <script>
+    const data = ${JSON.stringify(histogram)};
+    const ctx = document.getElementById('requestsChart').getContext('2d');
+
+    new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: data.map(d => d.date.slice(5)), // MM-DD format
+        datasets: [{
+          label: 'Requests',
+          data: data.map(d => d.requests),
+          borderColor: '#6366f1',
+          backgroundColor: 'rgba(99, 102, 241, 0.1)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 4,
+          pointBackgroundColor: '#6366f1'
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false }
+        },
+        scales: {
+          x: {
+            grid: { color: '#2a2a2a' },
+            ticks: { color: '#888' }
+          },
+          y: {
+            beginAtZero: true,
+            grid: { color: '#2a2a2a' },
+            ticks: { color: '#888', stepSize: 1 }
+          }
+        }
+      }
+    });
+  </script>
+</body>
+</html>`
+
+  return c.html(html)
+})
+
 // User stats endpoint
 app.get('/api/stats', authenticateAnonymous, (c) => {
   const user = c.get('user')
