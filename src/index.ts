@@ -384,7 +384,7 @@ app.get('/dashboard', (c) => {
   </div>
 
   <div class="chart-container">
-    <div class="chart-title">Requests (last 14 days)</div>
+    <div class="chart-title">Activity (last 14 days)</div>
     <canvas id="requestsChart"></canvas>
   </div>
 
@@ -405,13 +405,25 @@ app.get('/dashboard', (c) => {
           tension: 0.3,
           pointRadius: 4,
           pointBackgroundColor: '#6366f1'
+        }, {
+          label: 'Users',
+          data: data.map(d => d.users),
+          borderColor: '#f97316',
+          backgroundColor: 'rgba(249, 115, 22, 0.1)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 4,
+          pointBackgroundColor: '#f97316'
         }]
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: { display: false }
+          legend: {
+            display: true,
+            labels: { color: '#888' }
+          }
         },
         scales: {
           x: {
