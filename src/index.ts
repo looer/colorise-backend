@@ -9,6 +9,14 @@ import { jwt, sign, verify } from 'hono/jwt'
 import Replicate from 'replicate'
 import type { Context, Next } from 'hono'
 
+// Database imports
+import { getDatabase, closeDatabase } from './db/index.js'
+import * as dbUsers from './db/users.js'
+import * as dbSessions from './db/sessions.js'
+import * as dbRateLimits from './db/rate-limits.js'
+import * as dbEvents from './db/events.js'
+import * as analytics from './db/analytics.js'
+
 // Types
 interface UserPayload {
   userId: string
@@ -17,33 +25,6 @@ interface UserPayload {
   iat: number
   exp: number
   [key: string]: any
-}
-
-interface UserRecord {
-  userId: string
-  deviceFingerprint: string
-  createdAt: string
-  lastSeen: string
-  requestCount: number
-  sessions: Session[]
-  ipAddresses: Set<string>
-  totalProcessingTime?: number
-  averageProcessingTime?: number
-}
-
-interface Session {
-  sessionId: string
-  createdAt: string
-  ipAddress: string
-  userAgent: string
-  appVersion: string
-}
-
-interface RateLimit {
-  dailyRequests: number
-  lastResetDate: string
-  hourlyRequests: number
-  lastResetHour: number
 }
 
 type Variables = {
@@ -88,9 +69,8 @@ const replicate = new Replicate({
   auth: REPLICATE_API_TOKEN,
 })
 
-// In-memory storage (Railway mantiene il container)
-const anonymousUsers = new Map<string, UserRecord>()
-const rateLimits = new Map<string, RateLimit>()
+// Initialize database on startup
+getDatabase()
 
 // Routes
 
@@ -99,10 +79,10 @@ app.get('/health', (c) => {
   return c.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    users: anonymousUsers.size,
+    users: analytics.getTotalUsers(),
     uptime: process.uptime(),
     memory: process.memoryUsage(),
-    version: '1.0.0'
+    version: '1.1.0'
   })
 })
 
@@ -122,26 +102,25 @@ app.post('/api/auth/anonymous', async (c) => {
 
     console.log(`🔐 Auth request: ${user_id.substring(0, 8)}... from ${clientIP}`)
 
-    // Check or create user
-    let userRecord = anonymousUsers.get(user_id)
+    // Check or create user in database
+    let userRecord = dbUsers.getUser(user_id)
 
     if (!userRecord) {
       // New anonymous user
-      userRecord = {
+      dbUsers.createUser({
         userId: user_id,
         deviceFingerprint: device_info,
         createdAt: new Date().toISOString(),
         lastSeen: new Date().toISOString(),
-        requestCount: 0,
-        sessions: [],
-        ipAddresses: new Set([clientIP])
-      }
-
+        requestCount: 0
+      })
+      dbUsers.addUserIp(user_id, clientIP)
       console.log(`✨ New user: ${user_id.substring(0, 8)}...`)
+      userRecord = dbUsers.getUser(user_id)!
     } else {
       // Existing user
-      userRecord.lastSeen = new Date().toISOString()
-      userRecord.ipAddresses.add(clientIP)
+      dbUsers.updateUserLastSeen(user_id)
+      dbUsers.addUserIp(user_id, clientIP)
 
       // Security: device fingerprint check
       if (userRecord.deviceFingerprint !== device_info) {
@@ -149,28 +128,19 @@ app.post('/api/auth/anonymous', async (c) => {
       }
     }
 
-    // Create session
+    // Create session in database
     const sessionId = crypto.randomUUID()
-    const session: Session = {
+    dbSessions.createSession({
       sessionId,
+      userId: user_id,
       createdAt: new Date().toISOString(),
       ipAddress: clientIP,
       userAgent: c.req.header('user-agent') || 'unknown',
       appVersion: app_version || 'unknown'
-    }
+    })
 
-    userRecord.sessions.push(session)
-
-    // Keep only last 5 sessions
-    if (userRecord.sessions.length > 5) {
-      userRecord.sessions = userRecord.sessions.slice(-5)
-    }
-
-    // Save user
-    anonymousUsers.set(user_id, userRecord)
-
-    // Initialize rate limiting
-    initializeRateLimit(user_id)
+    // Initialize rate limiting in database
+    dbRateLimits.initializeRateLimit(user_id)
 
     // Generate JWT
     const payload: UserPayload = {
@@ -183,7 +153,7 @@ app.post('/api/auth/anonymous', async (c) => {
 
     const token = await sign(payload, JWT_SECRET)
 
-    const userLimits = rateLimits.get(user_id)
+    const userLimits = dbRateLimits.getRateLimit(user_id)
     const dailyLimit = getDailyLimit(user_id)
 
     return c.json({
@@ -265,7 +235,18 @@ app.post('/api/replicate/colorise',
       // Update user stats and counters
       updateUserAfterRequest(user.userId, totalTime)
 
-      const userLimits = rateLimits.get(user.userId)
+      // Log the event for analytics
+      dbEvents.logEvent({
+        userId: user.userId,
+        eventType: 'colorise',
+        createdAt: new Date().toISOString(),
+        processingTime: totalTime,
+        modelUsed,
+        ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || 'unknown',
+        success: true
+      })
+
+      const userLimits = dbRateLimits.getRateLimit(user.userId)
       const dailyLimit = getDailyLimit(user.userId)
 
       console.log(`🎉 Completed: ${user.userId.substring(0, 8)}... in ${totalTime}ms using ${modelUsed}`)
@@ -324,108 +305,36 @@ app.get('/stats', (c) => {
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
 
-  // Calculate stats for different periods
-  const stats24h = calculatePeriodStats(twentyFourHoursAgo, now)
-  const stats7d = calculatePeriodStats(sevenDaysAgo, now)
-  const stats30d = calculatePeriodStats(thirtyDaysAgo, now)
-
-  // Generate daily histogram for the last 7 days
-  const dailyHistogram = generateDailyHistogram(7)
-
   return c.json({
     timestamp: now.toISOString(),
     periods: {
-      '24h': {
-        totalRequests: stats24h.totalRequests,
-        uniqueUsers: stats24h.uniqueUsers,
-        averageRequestsPerUser: stats24h.averageRequestsPerUser
-      },
-      '7d': {
-        totalRequests: stats7d.totalRequests,
-        uniqueUsers: stats7d.uniqueUsers,
-        averageRequestsPerUser: stats7d.averageRequestsPerUser
-      },
-      '30d': {
-        totalRequests: stats30d.totalRequests,
-        uniqueUsers: stats30d.uniqueUsers,
-        averageRequestsPerUser: stats30d.averageRequestsPerUser
-      }
+      '24h': analytics.getStatsForPeriod(twentyFourHoursAgo, now),
+      '7d': analytics.getStatsForPeriod(sevenDaysAgo, now),
+      '30d': analytics.getStatsForPeriod(thirtyDaysAgo, now)
     },
     histogram: {
       type: 'daily',
       period: '7d',
-      data: dailyHistogram
+      data: analytics.getDailyHistogram(7)
     },
     totals: {
-      totalUsers: anonymousUsers.size
+      totalUsers: analytics.getTotalUsers()
     }
   })
 })
 
-// Helper function to calculate stats for a given period
-function calculatePeriodStats(startDate: Date, endDate: Date) {
-  let totalRequests = 0
-  let uniqueUsers = 0
-
-  for (const [userId, userRecord] of anonymousUsers.entries()) {
-    const lastSeen = new Date(userRecord.lastSeen)
-
-    // Check if user was active in the period
-    if (lastSeen >= startDate && lastSeen <= endDate) {
-      uniqueUsers++
-
-      // Get user's rate limit data to count requests
-      const userLimits = rateLimits.get(userId)
-      if (userLimits) {
-        // If the rate limit was reset today, use today's requests
-        const today = new Date().toDateString()
-        if (userLimits.lastResetDate === today) {
-          totalRequests += userLimits.dailyRequests
-        }
-      }
-    }
-  }
-
-  return {
-    totalRequests,
-    uniqueUsers,
-    averageRequestsPerUser: uniqueUsers > 0 ? Math.round(totalRequests / uniqueUsers * 100) / 100 : 0
-  }
-}
-
-// Helper function to generate daily histogram
-function generateDailyHistogram(days: number) {
-  const histogram = []
-  const now = new Date()
-
-  for (let i = days - 1; i >= 0; i--) {
-    const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000)
-    const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate())
-    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000)
-
-    const dayStats = calculatePeriodStats(dayStart, dayEnd)
-
-    histogram.push({
-      date: dayStart.toISOString().split('T')[0], // YYYY-MM-DD format
-      requests: dayStats.totalRequests,
-      users: dayStats.uniqueUsers
-    })
-  }
-
-  return histogram
-}
-
 // User stats endpoint
 app.get('/api/stats', authenticateAnonymous, (c) => {
   const user = c.get('user')
-  const userRecord = anonymousUsers.get(user.userId)
-  const userLimits = rateLimits.get(user.userId)
+  const userRecord = dbUsers.getUser(user.userId)
+  const userLimits = dbRateLimits.getRateLimit(user.userId)
 
   if (!userRecord) {
     return c.json({ error: 'User not found' }, 404)
   }
 
   const dailyLimit = getDailyLimit(user.userId)
+  const sessionsCount = dbSessions.getSessionCount(user.userId)
 
   return c.json({
     success: true,
@@ -435,7 +344,7 @@ app.get('/api/stats', authenticateAnonymous, (c) => {
       memberSince: userRecord.createdAt,
       totalRequests: userRecord.requestCount,
       averageProcessingTime: Math.round(userRecord.averageProcessingTime || 0),
-      sessionsCount: userRecord.sessions.length,
+      sessionsCount,
       lastSeen: userRecord.lastSeen,
       limits: {
         daily: dailyLimit,
@@ -562,33 +471,28 @@ if (process.env.NODE_ENV === 'development') {
   })
 
   app.get('/api/admin/users', (c) => {
-    const users = Array.from(anonymousUsers.values()).map(user => ({
+    const allUsers = dbUsers.getAllUsers()
+    const users = allUsers.map(user => ({
       userId: user.userId.substring(0, 8) + '...',
       createdAt: user.createdAt,
       requestCount: user.requestCount,
-      sessionsCount: user.sessions.length,
+      sessionsCount: dbSessions.getSessionCount(user.userId),
       lastSeen: user.lastSeen
     }))
 
     return c.json({
       success: true,
-      totalUsers: anonymousUsers.size,
+      totalUsers: allUsers.length,
       users: users.slice(0, 20) // Show first 20
     })
   })
 
   app.get('/api/admin/reset/:userId', (c) => {
     const userId = c.req.param('userId')
+    const user = dbUsers.getUser(userId)
 
-    if (anonymousUsers.has(userId)) {
-      const today = new Date().toDateString()
-      rateLimits.set(userId, {
-        dailyRequests: 0,
-        lastResetDate: today,
-        hourlyRequests: 0,
-        lastResetHour: new Date().getHours()
-      })
-
+    if (user) {
+      dbRateLimits.resetDailyRateLimit(userId)
       return c.json({ success: true, message: 'Rate limit reset' })
     }
 
@@ -658,38 +562,25 @@ async function processImageWithReplicate(image: Buffer | Blob | File) {
   throw lastError || new Error('All models failed')
 }
 
-function initializeRateLimit(userId: string): void {
-  if (!rateLimits.has(userId)) {
-    rateLimits.set(userId, {
-      dailyRequests: 0,
-      lastResetDate: new Date().toDateString(),
-      hourlyRequests: 0,
-      lastResetHour: new Date().getHours()
-    })
-  }
-}
-
 function checkUserRateLimit(userId: string) {
   const now = new Date()
   const currentDate = now.toDateString()
   const currentHour = now.getHours()
 
-  let userLimits = rateLimits.get(userId)
+  let userLimits = dbRateLimits.getRateLimit(userId)
 
   if (!userLimits) {
-    initializeRateLimit(userId)
-    userLimits = rateLimits.get(userId)!
+    dbRateLimits.initializeRateLimit(userId)
+    userLimits = dbRateLimits.getRateLimit(userId)!
   }
 
   // Reset counters if needed
   if (userLimits.lastResetDate !== currentDate) {
-    userLimits.dailyRequests = 0
-    userLimits.lastResetDate = currentDate
-    userLimits.hourlyRequests = 0
-    userLimits.lastResetHour = currentHour
+    dbRateLimits.resetDailyRateLimit(userId)
+    userLimits = dbRateLimits.getRateLimit(userId)!
   } else if (userLimits.lastResetHour !== currentHour) {
-    userLimits.hourlyRequests = 0
-    userLimits.lastResetHour = currentHour
+    dbRateLimits.resetHourlyRateLimit(userId)
+    userLimits = dbRateLimits.getRateLimit(userId)!
   }
 
   const dailyLimit = getDailyLimit(userId)
@@ -723,21 +614,11 @@ function checkUserRateLimit(userId: string) {
 }
 
 function updateUserAfterRequest(userId: string, processingTime: number): void {
-  // Update rate limits
-  const userLimits = rateLimits.get(userId)
-  if (userLimits) {
-    userLimits.dailyRequests++
-    userLimits.hourlyRequests++
-  }
+  // Update rate limits in database
+  dbRateLimits.incrementRateLimit(userId)
 
-  // Update user stats
-  const userRecord = anonymousUsers.get(userId)
-  if (userRecord) {
-    userRecord.requestCount++
-    userRecord.lastSeen = new Date().toISOString()
-    userRecord.totalProcessingTime = (userRecord.totalProcessingTime || 0) + processingTime
-    userRecord.averageProcessingTime = userRecord.totalProcessingTime / userRecord.requestCount
-  }
+  // Update user stats in database
+  dbUsers.updateUserAfterRequest(userId, processingTime)
 }
 
 function getDailyLimit(userId: string): number {
@@ -754,36 +635,32 @@ function getNextResetTime(): string {
 }
 
 
-// Cleanup job - remove old sessions
+// Cleanup job - remove old sessions and events
 setInterval(() => {
-  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000)
-  let cleanedSessions = 0
+  // Clean sessions older than 7 days
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+  const cleanedSessions = dbSessions.cleanOldSessions(sevenDaysAgo)
 
-  for (const [userId, userRecord] of anonymousUsers.entries()) {
-    const originalLength = userRecord.sessions.length
-    userRecord.sessions = userRecord.sessions.filter(
-      (session: Session) => new Date(session.createdAt) > oneDayAgo
-    )
-    cleanedSessions += originalLength - userRecord.sessions.length
-  }
+  // Clean events older than 90 days
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
+  const cleanedEvents = dbEvents.cleanOldEvents(ninetyDaysAgo)
 
-  if (cleanedSessions > 0) {
-    console.log(`🧹 Cleaned ${cleanedSessions} old sessions. Active users: ${anonymousUsers.size}`)
+  if (cleanedSessions > 0 || cleanedEvents > 0) {
+    console.log(`🧹 Cleaned ${cleanedSessions} old sessions, ${cleanedEvents} old events. Active users: ${analytics.getTotalUsers()}`)
   }
 }, 60 * 60 * 1000) // Every hour
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('👋 Server shutting down gracefully...')
-
-  // Save stats before shutdown (optional)
-  console.log(`📊 Final stats: ${anonymousUsers.size} users, ${Array.from(anonymousUsers.values()).reduce((sum, u) => sum + u.requestCount, 0)} total requests`)
-
+  console.log(`📊 Final stats: ${analytics.getTotalUsers()} users`)
+  closeDatabase()
   process.exit(0)
 })
 
 process.on('SIGINT', () => {
   console.log('\n👋 Server interrupted, shutting down...')
+  closeDatabase()
   process.exit(0)
 })
 
