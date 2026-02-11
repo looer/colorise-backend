@@ -335,6 +335,8 @@ app.get('/dashboard', (c) => {
   const stats30d = analytics.getStatsForPeriod(thirtyDaysAgo, now)
   const histogram = analytics.getDailyHistogram(14) // 14 days for better chart
   const totalUsers = analytics.getTotalUsers()
+  const usersActivity = analytics.getUsersActivity()
+  const newVsReturning = analytics.getNewVsReturningStats()
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -352,9 +354,18 @@ app.get('/dashboard', (c) => {
     .stat-label { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
     .stat-value { font-size: 2rem; font-weight: 600; color: #fff; }
     .stat-sub { font-size: 0.875rem; color: #666; margin-top: 4px; }
-    .chart-container { background: #1a1a1a; border-radius: 12px; padding: 24px; border: 1px solid #2a2a2a; }
+    .chart-container { background: #1a1a1a; border-radius: 12px; padding: 24px; border: 1px solid #2a2a2a; margin-bottom: 32px; }
     .chart-title { font-size: 1rem; margin-bottom: 16px; color: #fff; }
     canvas { max-height: 300px; }
+    .users-table { width: 100%; border-collapse: collapse; }
+    .users-table th { text-align: left; font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.5px; padding: 12px 16px; border-bottom: 1px solid #2a2a2a; }
+    .users-table td { padding: 12px 16px; border-bottom: 1px solid #1f1f1f; font-size: 0.875rem; }
+    .users-table tr:hover { background: #222; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 0.7rem; font-weight: 600; }
+    .badge-new { background: #064e3b; color: #6ee7b7; }
+    .badge-returning { background: #1e1b4b; color: #a5b4fc; }
+    .badge-warning { background: #451a03; color: #fbbf24; }
+    .section-title { font-size: 1.1rem; margin-bottom: 16px; color: #fff; }
   </style>
 </head>
 <body>
@@ -381,11 +392,53 @@ app.get('/dashboard', (c) => {
       <div class="stat-value">${totalUsers}</div>
       <div class="stat-sub">all time</div>
     </div>
+    <div class="stat-card">
+      <div class="stat-label">New (24h)</div>
+      <div class="stat-value">${newVsReturning.newUsers}</div>
+      <div class="stat-sub">first time users</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Returning (24h)</div>
+      <div class="stat-value">${newVsReturning.returningUsers}</div>
+      <div class="stat-sub">came back today</div>
+    </div>
   </div>
 
   <div class="chart-container">
     <div class="chart-title">Activity (last 14 days)</div>
     <canvas id="requestsChart"></canvas>
+  </div>
+
+  <div class="chart-container">
+    <div class="chart-title">Users Activity</div>
+    <table class="users-table">
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Status</th>
+          <th>Requests</th>
+          <th>Sessions</th>
+          <th>IPs</th>
+          <th>First Seen</th>
+          <th>Last Seen</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${usersActivity.map(u => {
+          const reqPerSession = u.sessionsCount > 0 ? (u.requestCount / u.sessionsCount).toFixed(1) : '0'
+          const suspicious = u.requestCount > 50 || u.ipCount > 5
+          return `<tr>
+            <td><code>${u.userId.substring(0, 12)}...</code></td>
+            <td>${u.isNew ? '<span class="badge badge-new">NEW</span>' : '<span class="badge badge-returning">RETURNING</span>'}${suspicious ? ' <span class="badge badge-warning">SUSPICIOUS</span>' : ''}</td>
+            <td>${u.requestCount}</td>
+            <td>${u.sessionsCount} <span style="color:#666">(${reqPerSession} req/sess)</span></td>
+            <td>${u.ipCount}</td>
+            <td>${new Date(u.createdAt).toLocaleDateString()}</td>
+            <td>${new Date(u.lastSeen).toLocaleDateString()}</td>
+          </tr>`
+        }).join('')}
+      </tbody>
+    </table>
   </div>
 
   <script>
