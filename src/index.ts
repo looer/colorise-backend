@@ -774,10 +774,12 @@ setInterval(() => {
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('👋 Server shutting down gracefully...')
+  console.log('👋 Server received SIGTERM, cleaning up...')
   console.log(`📊 Final stats: ${analytics.getTotalUsers()} users`)
   closeDatabase()
-  process.exit(0)
+  // Don't call process.exit() — let Railway manage the process lifecycle.
+  // During deployments, Railway will replace this process with the new one.
+  // Calling exit(0) causes Railway to mark the service as "completed" and stop it.
 })
 
 process.on('SIGINT', () => {
