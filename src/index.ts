@@ -393,6 +393,11 @@ app.get('/dashboard', (c) => {
       <div class="stat-sub">all time</div>
     </div>
     <div class="stat-card">
+      <div class="stat-label">Cost (7d)</div>
+      <div class="stat-value">$${(stats7d.totalRequests * 0.04).toFixed(2)}</div>
+      <div class="stat-sub">$${(stats30d.totalRequests * 0.04).toFixed(2)} last 30d</div>
+    </div>
+    <div class="stat-card">
       <div class="stat-label">New (24h)</div>
       <div class="stat-value">${newVsReturning.newUsers}</div>
       <div class="stat-sub">first time users</div>
@@ -419,6 +424,7 @@ app.get('/dashboard', (c) => {
           <th>Requests</th>
           <th>Sessions</th>
           <th>IPs</th>
+          <th>Cost</th>
           <th>First Seen</th>
           <th>Last Seen</th>
         </tr>
@@ -433,6 +439,7 @@ app.get('/dashboard', (c) => {
             <td>${u.requestCount}</td>
             <td>${u.sessionsCount} <span style="color:#666">(${reqPerSession} req/sess)</span></td>
             <td>${u.ipCount}</td>
+            <td>$${(u.requestCount * 0.04).toFixed(2)}</td>
             <td>${new Date(u.createdAt).toLocaleDateString()}</td>
             <td>${new Date(u.lastSeen).toLocaleDateString()}</td>
           </tr>`
